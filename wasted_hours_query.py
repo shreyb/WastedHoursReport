@@ -44,16 +44,18 @@ s = Search(using = client, index = indexpattern_generate(start_date, end_date))\
 
 
 #now do aggs
-a1 = A('filters', filters = {'Success':{'term':{'Resource_ExitCode':0}}, 
+a1 = A('filters', filters = {'Success':{'bool':{'must':{'term':{'Resource_ExitCode':0}}}}, 
 	'Failure': {'bool':{'must_not':{'term':{'Resource_ExitCode':0}}}}})
 a2 = A('terms', field = 'VOName')
 a3 = A('terms', field = 'CommonName')
+a4test = A('terms',field='Resource_ExitCode')
+a5test = A('filters',other_bucket_key = 'Failure', filters = {'Success':{'term':{'Resource_ExitCode':0}}})
 
-Buckets = s.aggs\
+
+Buckets = s.aggs.bucket('group_status',a1)\
 		.bucket('group_VO',a2)\
 		.bucket('group_CommonName',a3)
-		
-		#.bucket('group_status',a1)
+
 
 # FIGURE OUT HOW TO TOTAL JOBS
 Metric = Buckets.metric('numJobs', 'value_count', field = 'GlobalJobId')\
@@ -63,13 +65,29 @@ response = s.execute()
 resultset = response.aggregations
 
 
+
 #print json.dumps(response.to_dict(),sort_keys=True,indent=4)
 
 print resultset
 
-for VO in resultset.group_VO.buckets:
-	for CN in VO.group_CommonName.buckets:
-		print VO.key, CN.key, CN.numJobs.value, CN.WallHours.value 
+for key in resultset.group_status.buckets:
+	#print key
+	for item in resultset.group_status.buckets[key].group_VO.buckets:
+	#	print item
+		for item2 in item['group_CommonName'].buckets:
+			#print item2
+			print item2.key, item.key, key, item2['numJobs'].value, item2['WallHours'].value
+
+#for VO in resultset.group_VO.buckets:
+#	for CN in VO.group_CommonName.buckets:
+#		for teststatus in CN.testbucket.buckets:
+#		#	print teststatus
+#			if teststatus.key == 0:
+#				status = 'Success'
+#			else:
+#				status = 'Failure'
+#			print status, VO.key, CN.key, teststatus.numJobs.value, teststatus.WallHours.value
+			#print VO.key, CN.key, CN.numJobs.value, CN.WallHours.value 
 
 #for status in resultset.group_status:
 #	print status
