@@ -22,8 +22,13 @@ from indexpattern import indexpattern_generate
 
 client = Elasticsearch(['localhost:9200'], timeout = 60)
 
+#TEMPORARY
 #vo = 'uboone'
 #wildcardVOq = '*'+vo+'*'
+start_time = '2016/07/04'
+end_time = '2016/07/05'
+
+
 wildcardProbeNameq = 'condor:fifebatch?.fnal.gov'
 
 start_date = re.split('[/ :]', start_time)
@@ -39,13 +44,39 @@ s = Search(using = client, index = indexpattern_generate(start_date, end_date))\
 
 
 #now do aggs
-#Bucket = s.aggs.bucket('group_status','filters',filters={
+a1 = A('filters', filters = {'Success':{'term':{'Resource_ExitCode':0}}, 
+	'Failure': {'bool':{'must_not':{'term':{'Resource_ExitCode':0}}}}})
+a2 = A('terms', field = 'VOName')
+a3 = A('terms', field = 'CommonName')
 
-results = s.execute()
+Buckets = s.aggs\
+		.bucket('group_VO',a2)\
+		.bucket('group_CommonName',a3)
+		
+		#.bucket('group_status',a1)
 
-print json.dumps(response.to_dict(),sort_keys=True,indent=4)
+# FIGURE OUT HOW TO TOTAL JOBS
+Metric = Buckets.metric('numJobs', 'value_count', field = 'GlobalJobId')\
+	.metric('WallHours','sum',script="(doc['WallDuration'].value*doc['Processors'].value/3600)")
+
+response = s.execute()
+resultset = response.aggregations
 
 
+#print json.dumps(response.to_dict(),sort_keys=True,indent=4)
+
+print resultset
+
+for VO in resultset.group_VO.buckets:
+	for CN in VO.group_CommonName.buckets:
+		print VO.key, CN.key, CN.numJobs.value, CN.WallHours.value 
+
+#for status in resultset.group_status:
+#	print status
+#	print status.group_VO.buckets
+	#for VO in status.group_VO.buckets:
+	#	for CommonName in VO.group_CommonName.buckets:
+	##		print CommonName
 ##Temporary
 #start_time ='2016/07/04 00:00'
 #end_time='2016/07/05 23:59'
