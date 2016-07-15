@@ -67,11 +67,8 @@ resultset = response.aggregations
 
 print resultset
 
-for key in resultset.group_status.buckets:
-	#print key
-	for item in resultset.group_status.buckets[key].group_VO.buckets:
-	#	print item
-		for item2 in item['group_CommonName'].buckets:
-			#print item2
-			print item2.key, item.key, key, item2['numJobs'].value, item2['WallHours'].value
+for status in resultset.group_status.buckets:
+	for VO in resultset.group_status.buckets[status].group_VO.buckets:
+		for CommonName in VO['group_CommonName'].buckets:
+			print CommonName.key, VO.key, status, CommonName['numJobs'].value, CommonName['WallHours'].value
 
