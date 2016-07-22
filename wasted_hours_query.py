@@ -11,16 +11,16 @@ from elasticsearch_dsl import Q,A, Search
 from indexpattern import indexpattern_generate
 
 
-#client=Elasticsearch(['https://gracc.opensciencegrid.org/e'],
-#                     use_ssl = True,
-#                     verify_certs = True,
-#                     ca_certs = certifi.where(),
-#                     client_cert = 'gracc_cert/gracc-reports-dev.crt',
-#                     client_key = 'gracc_cert/gracc-reports-dev.key',
-#                     timeout = 60) 
+client=Elasticsearch(['https://gracc.opensciencegrid.org/e'],
+                     use_ssl = True,
+                     verify_certs = True,
+                     ca_certs = certifi.where(),
+                     client_cert = 'gracc_cert/gracc-reports-dev.crt',
+                     client_key = 'gracc_cert/gracc-reports-dev.key',
+                     timeout = 60) 
 
 
-client = Elasticsearch(['localhost:9200'], timeout = 60)
+#client = Elasticsearch(['localhost:9200'], timeout = 60)
 
 #TEMPORARY
 start_time = '2016/07/04'
