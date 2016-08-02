@@ -1,12 +1,20 @@
 import sys
 import optparse
+import traceback
+import json
+import certifi
+import logging
+import re
+from datetime import datetime
+from elasticsearch import Elasticsearch
+from elasticsearch_dsl import Q,A, Search
+
 import NiceNum
 import Configuration
+import TextUtils
 from MySQLUtils import MySQLUtils
 from Reporter import Reporter
-import TextUtils
-import traceback
-
+from indexpattern import indexpattern_generate
 
 class User:
     def __init__(self, user_name):
@@ -134,48 +142,114 @@ class WastedHoursReport(Reporter):
 
         :return:
         """
-        mysql_client_cfg = MySQLUtils.createClientConfig("main_db", self.config)
-        self.connect_str = MySQLUtils.getDbConnection("main_db", mysql_client_cfg, self.config)
-        select = "select VO.VOName,CommonName,if (ApplicationExitCode=0,'Success','Failure') as Status,sum(NJobs) as NJobs," + \
-               "round(sum(WallDuration*Cores/3600.),1) as WallHours from MasterSummaryData m " + \
-               "JOIN VONameCorrection VC ON (VC.corrid=m.VOcorrid) JOIN VO on (VC.void = VO.void) " + \
-               "where EndTime>'"+self.start_time + "' AND EndTime < '"+self.end_time + \
-               "' and probename like 'condor:fifebatch%.fnal.gov' group by status,VOName,CommonName order by VO.VOName,CommonName,status;"
-        if self.verbose:
-            print >> sys.stdout, select
+#        mysql_client_cfg = MySQLUtils.createClientConfig("main_db", self.config)
+#        self.connect_str = MySQLUtils.getDbConnection("main_db", mysql_client_cfg, self.config)
+#        select = "select VO.VOName,CommonName,if (ApplicationExitCode=0,'Success','Failure') as Status,sum(NJobs) as NJobs," + \
+#               "round(sum(WallDuration*Cores/3600.),1) as WallHours from MasterSummaryData m " + \
+#               "JOIN VONameCorrection VC ON (VC.corrid=m.VOcorrid) JOIN VO on (VC.void = VO.void) " + \
+#               "where EndTime>'"+self.start_time + "' AND EndTime < '"+self.end_time + \
+#               "' and probename like 'condor:fifebatch%.fnal.gov' group by status,VOName,CommonName order by VO.VOName,CommonName,status;"
 
-        results, return_code = MySQLUtils.RunQuery(select, self.connect_str)
-        if return_code != 0:
-            raise Exception('Error to access mysql database')
-        if self.verbose:
-            print >> sys.stdout, results
+        #Have a method start the client, return it            
+        client=Elasticsearch(['https://gracc.opensciencegrid.org/e'],
+                         use_ssl = True,
+                         verify_certs = True,
+                         ca_certs = certifi.where(),
+                         client_cert = 'gracc_cert/gracc-reports-dev.crt',
+                         client_key = 'gracc_cert/gracc-reports-dev.key',
+                         timeout = 60) 
 
-        if len(results) == 1 and len(results[0].strip()) == 0:
-            print >> sys.stdout, "Nothing to report"
-            return
 
-        for line in results:
-            tmp = line.split('\t')
-            name = tmp[0]
-            uname = tmp[1]
-            status = tmp[2]
-            count = int(tmp[3])
-            hours = float(tmp[4])
-            if not self.experiments.has_key(name):
-                exp = Experiment(name)
-                self.experiments[name] = exp 
-            else:
-                exp = self.experiments[name]
-            if not exp.users.has_key(uname):
-                user = User(uname)
-                exp.add_user(uname, user)
-            if status == "Success":
-                user.add_success(count, hours)
-                exp.add_success(count, hours)
-            else:
-                user.add_failure(count, hours)
-                exp.add_failure(count, hours)
-        MySQLUtils.removeClientConfig(mysql_client_cfg)
+        #client = Elasticsearch(['localhost:9200'], timeout = 60)
+
+
+        wildcardProbeNameq = 'condor:fifebatch?.fnal.gov'
+        
+        # Have a method to do this - perhaps in Reporter class
+        start_date = re.split('[/ :]', self.start_time)
+        starttimeq = datetime(*[int(elt) for elt in start_date]).isoformat()
+
+        end_date = re.split('[/ :]', self.end_time)
+        endtimeq = datetime(*[int(elt) for elt in end_date]).isoformat()
+
+
+        # Need specific query method
+        s = Search(using = client, index = indexpattern_generate(start_date, end_date))\
+                   .query("wildcard",ProbeName=wildcardProbeNameq)\
+               .filter("range",EndTime={"gte":starttimeq,"lt":endtimeq})
+
+
+        # Aggregations
+        a1 = A('filters', filters = {'Success':{'bool':{'must':{'term':{'Resource_ExitCode':0}}}},
+            'Failure': {'bool':{'must_not':{'term':{'Resource_ExitCode':0}}}}})
+        a2 = A('terms', field = 'VOName')
+        a3 = A('terms', field = 'CommonName')
+
+
+        Buckets = s.aggs.bucket('group_status',a1)\
+                .bucket('group_VO',a2)\
+                .bucket('group_CommonName',a3)
+
+
+        # Metrics
+        # FIGURE OUT HOW TO TOTAL JOBS
+        Metric = Buckets.metric('numJobs', 'value_count', field = 'GlobalJobId')\
+            .metric('WallHours','sum',script="(doc['WallDuration'].value*doc['Processors'].value/3600)")
+
+        ### Query method ends here
+
+        response = s.execute()
+        resultset = response.aggregations
+
+        #print json.dumps(response.to_dict(),sort_keys=True,indent=4)
+
+        print resultset
+
+        for status in resultset.group_status.buckets:
+            for VO in resultset.group_status.buckets[status].group_VO.buckets:
+                for CommonName in VO['group_CommonName'].buckets:
+                    print CommonName.key, VO.key, status, CommonName['numJobs'].value, CommonName['WallHours'].value 
+
+
+        # Figure out how to translate all of this from the old query to the new.
+
+        #if self.verbose:
+        #        print >> sys.stdout, select
+
+        #results, return_code = MySQLUtils.RunQuery(select, self.connect_str)
+        
+        
+        #if return_code != 0:
+        #    raise Exception('Error to access mysql database')
+        #if self.verbose:
+        #    print >> sys.stdout, results
+
+        #if len(results) == 1 and len(results[0].strip()) == 0:
+        #    print >> sys.stdout, "Nothing to report"
+        #    return
+
+#        for line in results:
+#            tmp = line.split('\t')
+#            name = tmp[0]
+#            uname = tmp[1]
+#            status = tmp[2]
+#            count = int(tmp[3])
+#            hours = float(tmp[4])
+#            if not self.experiments.has_key(name):
+#                exp = Experiment(name)
+#                self.experiments[name] = exp 
+#            else:
+#                exp = self.experiments[name]
+#            if not exp.users.has_key(uname):
+#                user = User(uname)
+#                exp.add_user(uname, user)
+#            if status == "Success":
+#                user.add_success(count, hours)
+#                exp.add_success(count, hours)
+#            else:
+#                user.add_failure(count, hours)
+#                exp.add_failure(count, hours)
+#        MySQLUtils.removeClientConfig(mysql_client_cfg)
 
     def send_report(self):
         if len(self.experiments) == 0:
@@ -231,7 +305,7 @@ if __name__ == "__main__":
         config.configure(opts.config)
         report = WastedHoursReport(config, opts.start, opts.end, opts.is_test, opts.verbose)
         report.generate()
-        report.send_report()
+        #report.send_report()
     except:
         print >> sys.stderr, traceback.format_exc()
         sys.exit(1)
