@@ -5,7 +5,7 @@ import json
 import certifi
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, date
 from elasticsearch import Elasticsearch
 from elasticsearch_dsl import Q,A, Search
 
@@ -137,6 +137,12 @@ class WastedHoursReport(Reporter):
         self.experiments = {}
         self.connect_str = None
 
+
+    def query(self,client):
+        pass
+
+
+
     def generate(self):
         """
 
@@ -162,22 +168,15 @@ class WastedHoursReport(Reporter):
 
         #client = Elasticsearch(['localhost:9200'], timeout = 60)
 
-
         wildcardProbeNameq = 'condor:fifebatch?.fnal.gov'
-        
-        # Have a method to do this - perhaps in Reporter class
-        start_date = re.split('[/ :]', self.start_time)
-        starttimeq = datetime(*[int(elt) for elt in start_date]).isoformat()
-
-        end_date = re.split('[/ :]', self.end_time)
-        endtimeq = datetime(*[int(elt) for elt in end_date]).isoformat()
-
+       
+        starttimeq = self.dateparse(self.start_time)
+        endtimeq = self.dateparse(self.end_time)
 
         # Need specific query method
-        s = Search(using = client, index = indexpattern_generate(start_date, end_date))\
+        s = Search(using = client, index = indexpattern_generate(self.start_time, self.end_time))\
                    .query("wildcard",ProbeName=wildcardProbeNameq)\
                .filter("range",EndTime={"gte":starttimeq,"lt":endtimeq})
-
 
         # Aggregations
         a1 = A('filters', filters = {'Success':{'bool':{'must':{'term':{'Resource_ExitCode':0}}}},
