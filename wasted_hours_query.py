@@ -23,8 +23,8 @@ client=Elasticsearch(['https://gracc.opensciencegrid.org/e'],
 #client = Elasticsearch(['localhost:9200'], timeout = 60)
 
 #TEMPORARY
-start_time = '2016/07/04'
-end_time = '2016/07/05'
+start_time = '2016/07/20 00:00'
+end_time = '2016/07/22 00:00'
 
 
 wildcardProbeNameq = 'condor:fifebatch?.fnal.gov'
@@ -68,5 +68,6 @@ print resultset
 for status in resultset.group_status.buckets:
 	for VO in resultset.group_status.buckets[status].group_VO.buckets:
 		for CommonName in VO['group_CommonName'].buckets:
-			print CommonName.key, VO.key, status, CommonName['numJobs'].value, CommonName['WallHours'].value
+			print VO.key, CommonName.key, status, CommonName['numJobs'].value, CommonName['WallHours'].value
+
 

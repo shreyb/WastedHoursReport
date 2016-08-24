@@ -1,12 +1,20 @@
 import sys
 import optparse
+import traceback
+import json
+import certifi
+import logging
+import re
+from datetime import datetime, date
+from elasticsearch import Elasticsearch
+from elasticsearch_dsl import Q, A, Search
+
 import NiceNum
 import Configuration
-from MySQLUtils import MySQLUtils
-from Reporter import Reporter
 import TextUtils
-import traceback
-
+# from MySQLUtils import MySQLUtils
+from Reporter import Reporter
+from indexpattern import indexpattern_generate
 
 class User:
     def __init__(self, user_name):
@@ -38,8 +46,8 @@ class User:
         :return:
         """
         failure_rate = 0
-        if self.success[0]+self.failure[0] > 0:
-            failure_rate = self.failure[0]*100./(self.success[0]+self.failure[0])
+        if self.success[0] + self.failure[0] > 0:
+            failure_rate = self.failure[0] * 100. / (self.success[0] + self.failure[0])
         return failure_rate
 
     def get_waste_per(self):
@@ -48,8 +56,8 @@ class User:
         :return:
         """
         waste_per = 0
-        if self.success[1]+self.failure[1] > 0:
-            waste_per = self.failure[1]*100./(self.success[1]+self.failure[1])
+        if self.success[1] + self.failure[1] > 0:
+            waste_per = self.failure[1] * 100. / (self.success[1] + self.failure[1])
         return waste_per
 
 
@@ -96,8 +104,8 @@ class Experiment:
         :return:
         """
         failure_rate = 0
-        if self.success[0]+self.failure[0] > 0:
-            failure_rate = self.failure[0]*100./(self.success[0]+self.failure[0])
+        if self.success[0] + self.failure[0] > 0:
+            failure_rate = self.failure[0] * 100. / (self.success[0] + self.failure[0])
         return failure_rate
 
     def get_waste_per(self):
@@ -106,8 +114,8 @@ class Experiment:
         :return:
         """
         waste_per = 0
-        if self.success[1]+self.failure[1] > 0:
-            waste_per = self.failure[1]*100./(self.success[1]+self.failure[1])
+        if self.success[1] + self.failure[1] > 0:
+            waste_per = self.failure[1] * 100. / (self.success[1] + self.failure[1])
         return waste_per
 
 
@@ -129,53 +137,108 @@ class WastedHoursReport(Reporter):
         self.experiments = {}
         self.connect_str = None
 
+    def query(self, client):
+        """Query method to grab wasted hours, return query object"""
+
+        wildcardProbeNameq = 'condor:fifebatch?.fnal.gov'
+
+        starttimeq = self.dateparse(self.start_time)
+        endtimeq = self.dateparse(self.end_time)
+
+        s = Search(using = client, index = indexpattern_generate(self.start_time, self.end_time))\
+                   .query("wildcard", ProbeName=wildcardProbeNameq)\
+               .filter("range", EndTime={"gte" : starttimeq, "lt" : endtimeq})
+
+        # Aggregations
+        a1 = A('filters', filters = {'Success' : {'bool' : {'must' : {'term' : {'Resource_ExitCode' : 0}}}},
+            'Failure': {'bool' : {'must_not' : {'term' : {'Resource_ExitCode' : 0}}}}})
+        a2 = A('terms', field = 'VOName')
+        a3 = A('terms', field = 'CommonName')
+
+        Buckets = s.aggs.bucket('group_status', a1)\
+                .bucket('group_VO', a2)\
+                .bucket('group_CommonName', a3)
+
+        # Metrics
+        # FIGURE OUT HOW TO TOTAL JOBS
+        Metric = Buckets.metric('numJobs', 'value_count', field = 'GlobalJobId')\
+            .metric('WallHours', 'sum', script="(doc['WallDuration'].value*doc['Processors'].value/3600)")
+
+        if self.verbose:
+            print s.to_dict()
+
+        return s
+
     def generate(self):
         """
 
         :return:
         """
-        mysql_client_cfg = MySQLUtils.createClientConfig("main_db", self.config)
-        self.connect_str = MySQLUtils.getDbConnection("main_db", mysql_client_cfg, self.config)
-        select = "select VO.VOName,CommonName,if (ApplicationExitCode=0,'Success','Failure') as Status,sum(NJobs) as NJobs," + \
-               "round(sum(WallDuration*Cores/3600.),1) as WallHours from MasterSummaryData m " + \
-               "JOIN VONameCorrection VC ON (VC.corrid=m.VOcorrid) JOIN VO on (VC.void = VO.void) " + \
-               "where EndTime>'"+self.start_time + "' AND EndTime < '"+self.end_time + \
-               "' and probename like 'condor:fifebatch%.fnal.gov' group by status,VOName,CommonName order by VO.VOName,CommonName,status;"
+#        mysql_client_cfg = MySQLUtils.createClientConfig("main_db", self.config)
+#        self.connect_str = MySQLUtils.getDbConnection("main_db", mysql_client_cfg, self.config)
+#        select = "select VO.VOName,CommonName,if (ApplicationExitCode=0,'Success','Failure') as Status,sum(NJobs) as NJobs," + \
+#               "round(sum(WallDuration*Cores/3600.),1) as WallHours from MasterSummaryData m " + \
+#               "JOIN VONameCorrection VC ON (VC.corrid=m.VOcorrid) JOIN VO on (VC.void = VO.void) " + \
+#               "where EndTime>'"+self.start_time + "' AND EndTime < '"+self.end_time + \
+#               "' and probename like 'condor:fifebatch%.fnal.gov' group by status,VOName,CommonName order by VO.VOName,CommonName,status;"
+
+        # Initialize the Elasticsearch client
+        client = Elasticsearch(['https://gracc.opensciencegrid.org/e'],
+                         use_ssl = True,
+                         verify_certs = True,
+                         ca_certs = certifi.where(),
+                         client_cert = 'gracc_cert/gracc-reports-dev.crt',
+                         client_key = 'gracc_cert/gracc-reports-dev.key',
+                         timeout = 60)
+
+        # client = Elasticsearch(['localhost:9200'], timeout = 60)
+
+        resultquery = self.query(client)
+        response = resultquery.execute()
+        return_code_success = response.success()
+        results = response.aggregations
+
+        # print json.dumps(response.to_dict(),sort_keys=True,indent=4)
+
+        table_results = []
+        for status in results.group_status.buckets:
+            for VO in results.group_status.buckets[status].group_VO.buckets:
+                for CommonName in VO['group_CommonName'].buckets:
+                    table_results.append([CommonName.key, VO.key, status, CommonName['numJobs'].value, CommonName['WallHours'].value])
+
+        # Figure out how to translate all of this from the old query to the new.
+
+        if not return_code_success:
+            raise Exception('Error querying elasticsearch')
+
         if self.verbose:
-            print >> sys.stdout, select
+            print table_results 
+        # if len(results) == 1 and len(results[0].strip()) == 0:
+        #    print >> sys.stdout, "Nothing to report"
+        #    return
 
-        results, return_code = MySQLUtils.RunQuery(select, self.connect_str)
-        if return_code != 0:
-            raise Exception('Error to access mysql database')
-        if self.verbose:
-            print >> sys.stdout, results
-
-        if len(results) == 1 and len(results[0].strip()) == 0:
-            print >> sys.stdout, "Nothing to report"
-            return
-
-        for line in results:
-            tmp = line.split('\t')
-            name = tmp[0]
-            uname = tmp[1]
-            status = tmp[2]
-            count = int(tmp[3])
-            hours = float(tmp[4])
-            if not self.experiments.has_key(name):
-                exp = Experiment(name)
-                self.experiments[name] = exp 
-            else:
-                exp = self.experiments[name]
-            if not exp.users.has_key(uname):
-                user = User(uname)
-                exp.add_user(uname, user)
-            if status == "Success":
-                user.add_success(count, hours)
-                exp.add_success(count, hours)
-            else:
-                user.add_failure(count, hours)
-                exp.add_failure(count, hours)
-        MySQLUtils.removeClientConfig(mysql_client_cfg)
+#        for line in results:
+#            tmp = line.split('\t')
+#            name = tmp[0]
+#            uname = tmp[1]
+#            status = tmp[2]
+#            count = int(tmp[3])
+#            hours = float(tmp[4])
+#            if not self.experiments.has_key(name):
+#                exp = Experiment(name)
+#                self.experiments[name] = exp
+#            else:
+#                exp = self.experiments[name]
+#            if not exp.users.has_key(uname):
+#                user = User(uname)
+#                exp.add_user(uname, user)
+#            if status == "Success":
+#                user.add_success(count, hours)
+#                exp.add_success(count, hours)
+#            else:
+#                user.add_failure(count, hours)
+#                exp.add_failure(count, hours)
+#        MySQLUtils.removeClientConfig(mysql_client_cfg)
 
     def send_report(self):
         if len(self.experiments) == 0:
@@ -186,7 +249,7 @@ class WastedHoursReport(Reporter):
                 failure_rate = round(user.get_failure_rate(), 1)
                 waste_per = round(user.get_waste_per(), 1)
                 table += '\n<tr><td align="left">%s</td><td align="left">%s</td><td align="right">%s</td><td align="right">%s</td><td align="right">%s</td><td align="right">%s</td><td align="right">%s</td><td align="right">%s</td></tr>' %\
-                      (key, uname, NiceNum.niceNum(user.success[0]+user.failure[0]),  NiceNum.niceNum(user.failure[0]), failure_rate, NiceNum.niceNum(user.success[1]+user.failure[1], 1), NiceNum.niceNum(user.failure[1], 1), waste_per)
+                      (key, uname, NiceNum.niceNum(user.success[0] + user.failure[0]),  NiceNum.niceNum(user.failure[0]), failure_rate, NiceNum.niceNum(user.success[1] + user.failure[1], 1), NiceNum.niceNum(user.failure[1], 1), waste_per)
         text = "".join(open("template_wasted_hours.html").readlines())
         text = text.replace("$START", self.start_time)
         text = text.replace("$END", self.end_time)
@@ -201,7 +264,7 @@ class WastedHoursReport(Reporter):
         else:
             pass
             # emails=self.config.get("email", "%s_email" % (self.vo.lower())).split(",")+self.config.get("email", "test_to").split(",")
-        TextUtils.sendEmail(([], emails), "%s Wasted Hours on the GPGrid (%s - %s)" % ("FIFE", self.start_time, self.end_time), {"html": text},  ("Gratia Operation", "tlevshin@fnal.gov"), "smtp.fnal.gov")
+        TextUtils.sendEmail(([], emails), "%s Wasted Hours on the GPGrid (%s - %s)" % ("FIFE", self.start_time, self.end_time), {"html": text},  ("Gratia Operation", "sbhat@fnal.gov"), "smtp.fnal.gov")
         # os.unlink(fn)
 
 
@@ -231,7 +294,7 @@ if __name__ == "__main__":
         config.configure(opts.config)
         report = WastedHoursReport(config, opts.start, opts.end, opts.is_test, opts.verbose)
         report.generate()
-        report.send_report()
+        # report.send_report()
     except:
         print >> sys.stderr, traceback.format_exc()
         sys.exit(1)
